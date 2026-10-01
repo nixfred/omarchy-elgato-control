@@ -866,6 +866,7 @@ class Daemon:
 
     def sync_mic_keys(self):
         """Keep mic-mute keys in step with the real mute state; flash red while muted."""
+        if next(self.mic_key_slots(), None) is None: return
         wave = self.status.get("wave")
         muted = mic_muted(str((wave or {}).get("sourceId", "@DEFAULT_AUDIO_SOURCE@")))
         phase = int(time.monotonic() / 0.6) % 2 if muted else None
@@ -959,7 +960,6 @@ class Daemon:
                     self.lcd_signature = None
                     for device in self.devices.values():
                         if device["productId"] == PLUS: self.decorate(device["handle"])
-                        elif device["productId"] == DECK: self.decorate_deck(device["handle"])
                         elif device["productId"] == DECK: self.decorate_deck(device["handle"])
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
             for d in list(self.devices.values()):
