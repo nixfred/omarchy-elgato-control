@@ -909,12 +909,14 @@ class Daemon:
 
     def sync_mic_keys(self):
         """Keep mic-mute keys in step with the real mute state; flash red while muted."""
+        slots = list(self.mic_key_slots())
+        if not slots: self.mic_muted, self.mic_phase = False, None; return
         wave = self.status.get("wave")
         muted = mic_muted(str((wave or {}).get("sourceId", "@DEFAULT_AUDIO_SOURCE@")))
         phase = int(time.monotonic() / 0.6) % 2 if muted else None
         if muted == self.mic_muted and phase == self.mic_phase: return
         self.mic_muted, self.mic_phase = muted, phase
-        for d, i, key, is_deck in self.mic_key_slots():
+        for d, i, key, is_deck in slots:
             if muted:
                 data = mute_jpeg(phase == 0, 72 if is_deck else 120, is_deck)
                 if data: self.write_key_jpeg(d["handle"], i, data)
@@ -1003,7 +1005,6 @@ class Daemon:
                     self.lcd_signature = None
                     for device in self.devices.values():
                         if device["productId"] == PLUS: self.decorate(device["handle"])
-                        elif device["productId"] == DECK: self.decorate_deck(device["handle"])
                         elif device["productId"] == DECK: self.decorate_deck(device["handle"])
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
             for d in list(self.devices.values()):

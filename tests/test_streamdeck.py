@@ -27,8 +27,9 @@ class DeviceModelTests(unittest.TestCase):
         profile = {"dials": [{"label": "Volume"}, {"label": "Microphone"}]}
         svg = module.lcd_svg(profile, 55, [])
         self.assertIn('width="800" height="100"', svg)
-        self.assertIn("Volume", svg)
-        self.assertIn("Microphone", svg)
+        # This fork draws a per-action icon on each dial cell instead of the
+        # dial's name (9915485), so assert on the cells, not the labels.
+        self.assertEqual(4, svg.count('<linearGradient id="dial'))  # one cell per physical dial
 
     def test_wave_actions_target_detected_source(self):
         command = module.command_for("mic_mute", {"sourceId": 89})
