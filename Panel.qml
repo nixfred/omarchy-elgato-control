@@ -13,12 +13,13 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
-  property var status: ({ running: false, plus: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
-  property var profile: ({ keys: [], dials: [], pedals: [] })
+  property var status: ({ running: false, plus: null, pedal: null, deck: null, profile: "Omarchy Default", brightness: 55 })
+  property var profile: ({ keys: [], deckKeys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus !== null || status.pedal !== null
+  readonly property bool connected: status.plus !== null || status.pedal !== null || (status.deck !== null && status.deck !== undefined)
   readonly property bool hasPlus: status.plus !== null
   readonly property bool hasPedal: status.pedal !== null
+  readonly property bool hasDeck: status.deck !== null && status.deck !== undefined
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
@@ -32,10 +33,19 @@ Panel {
   readonly property color controlBorder: Qt.rgba(1, 1, 1, 0.22)
   readonly property var deviceOptions: [
     hasPlus ? { value: "streamdeck", label: "Stream Deck +" } : null,
+    hasDeck ? { value: "deck", label: "Stream Deck" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
     hasWave ? { value: "wave", label: "Wave:3" } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
   ].filter(function(x) { return x !== null })
+
+  function ensureDevice() {
+    if (deviceOptions.length === 0 || deviceOptions.some(function(x) { return x.value === selectedDevice })) return
+    selectedDevice = deviceOptions[0].value; selectedIndex = 0; selectedLightIndex = -1
+    selectedControl = selectedDevice === "streamdeck" || selectedDevice === "deck" ? "key" : selectedDevice
+  }
+  onDeviceOptionsChanged: ensureDevice()
+  Component.onCompleted: ensureDevice()
 
   function selectControl(type, index) { selectedControl = type; selectedIndex = index }
   function actionName(value) {
@@ -49,6 +59,7 @@ Panel {
   function saveAction(slot, action) {
     if (selectedDevice === "streamdeck" && selectedControl === "key") saveProc.command = [helper, "set-key", String(selectedIndex + 1), action]
     else if (selectedDevice === "streamdeck" && selectedControl === "dial") saveProc.command = [helper, "set-dial", String(selectedIndex + 1), slot, action]
+    else if (selectedDevice === "deck") saveProc.command = [helper, "set-deck-key", String(selectedIndex + 1), action]
     else if (selectedDevice === "pedal") saveProc.command = [helper, "set-pedal", String(selectedIndex + 1), action]
     else return
     saveProc.running = true
@@ -180,7 +191,7 @@ Panel {
           width: parent.width
           options: root.deviceOptions
           value: root.selectedDevice
-          onChanged: function(value) { root.selectedDevice = value; root.selectedIndex = 0; root.selectedLightIndex = -1; root.selectedControl = value === "streamdeck" ? "key" : value }
+          onChanged: function(value) { root.selectedDevice = value; root.selectedIndex = 0; root.selectedLightIndex = -1; root.selectedControl = value === "streamdeck" || value === "deck" ? "key" : value }
         }
 
         Row {
@@ -189,6 +200,29 @@ Panel {
           Rectangle {
             width: parent.width * 0.61; height: Style.space(310); radius: 0
             color: Qt.rgba(0, 0, 0, 0.28); border.color: Qt.rgba(1, 1, 1, 0.14)
+
+            Column {
+              visible: root.selectedDevice === "deck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
+              Text { anchors.horizontalCenter: parent.horizontalCenter; text: "STREAM DECK"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+              Grid {
+                width: parent.width; columns: 5; columnSpacing: Style.space(6); rowSpacing: Style.space(6)
+                Repeater {
+                  model: root.profile.deckKeys || []
+                  Rectangle {
+                    width: (parent.width - Style.space(24)) / 5; height: width; radius: 0
+                    color: root.selectedIndex === index ? root.controlFaceRaised : root.controlFace
+                    border.width: root.selectedIndex === index ? 2 : 1
+                    border.color: root.selectedIndex === index ? Color.accent : root.controlBorder
+                    Column { anchors.centerIn: parent; width: parent.width - Style.space(6); spacing: Style.space(2)
+                      Text { anchors.horizontalCenter: parent.horizontalCenter; text: index + 1; color: Color.muted; font.family: Style.font.family; font.pixelSize: 8 }
+                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Style.space(22); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
+                      Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: modelData.action ? root.actionName(modelData.action) : ""; textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 8 }
+                    }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectControl("key", index) }
+                  }
+                }
+              }
+            }
 
             Column {
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
@@ -307,14 +341,14 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "deck" ? "Key " + (root.selectedIndex + 1) : root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
-            Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
+            Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "deck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
             SearchableDropdown {
-              visible: (root.selectedDevice === "streamdeck" && root.selectedControl === "key") || root.selectedDevice === "pedal"
+              visible: (root.selectedDevice === "streamdeck" && root.selectedControl === "key") || root.selectedDevice === "deck" || root.selectedDevice === "pedal"
               width: parent.width; label: "On press"; options: root.actionOptions
-              value: root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.profile.keys[root.selectedIndex] || {}).action || "")
+              value: root.selectedDevice === "deck" ? ((root.profile.deckKeys[root.selectedIndex] || {}).action || "") : root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.profile.keys[root.selectedIndex] || {}).action || "")
               onChanged: function(action) { root.saveAction("action", action) }
             }
             Column {

@@ -3,11 +3,13 @@
 import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 VID = 0x0FD9
-PLUS, PEDAL = 0x0084, 0x0086
+PLUS, PEDAL, DECK = 0x0084, 0x0086, 0x006D
 DEVICE_SPECS = {
     PLUS: {"kind": "streamdeck", "capabilities": ["keys", "dials", "dialPress", "lcd", "touch", "brightness"]},
     PEDAL: {"kind": "pedal", "capabilities": ["pedals"]},
+    DECK: {"kind": "streamdeckv2", "capabilities": ["keys", "brightness"]},
 }
+DECK_KEYS = 15
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 import cyber_icons
@@ -226,7 +228,12 @@ def ensure_profile():
 
 def load_profile():
     ensure_profile()
-    with PROFILE.open() as f: return json.load(f)
+    with PROFILE.open() as f: profile = json.load(f)
+    # Stream Deck (original V2) has 15 keys; seed from the Plus keys until customised.
+    keys = list(profile.get("deckKeys") or profile.get("keys", []))[:DECK_KEYS]
+    keys += [{"label": "", "action": "", "color": [0, 0, 0]} for _ in range(DECK_KEYS - len(keys))]
+    profile["deckKeys"] = keys
+    return profile
 
 def save_profile(profile):
     CONFIG.mkdir(parents=True, exist_ok=True)
@@ -347,7 +354,7 @@ def set_control_action(kind, index, slot, action):
     profile = load_profile()
     controls = profile.get(kind, [])
     if index < 0 or index >= len(controls): raise ValueError("Control index is out of range")
-    allowed = {"keys": ("action",), "pedals": ("action",), "dials": ("left", "press", "right")}
+    allowed = {"keys": ("action",), "deckKeys": ("action",), "pedals": ("action",), "dials": ("left", "press", "right")}
     if kind not in allowed or slot not in allowed[kind]: raise ValueError("Invalid control slot")
     controls[index][slot] = action
     if slot == "action": controls[index]["label"] = action_label(action)
@@ -553,6 +560,30 @@ def audio_readout(target):
         pass
     return "Unavailable"
 
+def mic_muted(target):
+    try:
+        out = subprocess.run(["wpctl", "get-volume", target], capture_output=True, text=True, timeout=1).stdout
+        return "[MUTED]" in out
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+def mute_jpeg(flash, size, rotate):
+    """The stock mic key with a red flash and a slash through the mic."""
+    converter = shutil.which("magick") or shutil.which("convert")
+    base = ICONS / "mic_mute.jpg"
+    if not converter or not base.is_file(): return None
+    KEY_CACHE.mkdir(parents=True, exist_ok=True)
+    out = KEY_CACHE / ("muted-%d-%d-%d-v3.jpg" % (size, int(flash), int(rotate)))
+    if not out.is_file():
+        command = [converter, str(base)]
+        if flash: command += ["(", "-size", "120x120", "xc:#e60012", ")", "-compose", "Lighten", "-composite"]
+        command += ["-fill", "none", "-stroke", "#3a0008", "-strokewidth", "10", "-draw", "line 30,22 90,82",
+                    "-stroke", "white", "-strokewidth", "4", "-draw", "line 30,22 90,82", "-resize", "%dx%d!" % (size, size)]
+        if rotate: command += ["-rotate", "180"]
+        try: subprocess.run(command + ["-quality", "92", str(out)], check=True, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError): return None
+    return out.read_bytes()
+
 def dial_icon_svg(action, readout, x, color):
     """Scale the symbol itself from 35% to full size using the live level."""
     match = re.search(r"(\d+)%", readout)
@@ -635,26 +666,54 @@ class Daemon:
         self.lcd_signature = None
         self.camera_state = None
         self.camera_off_since = None
+        self.mic_muted = False
+        self.mic_phase = None
         self.icon_theme = cyber_icons.theme_signature()
         self.running = True
         self.capture_process = None
         self.capture_log = None
         self.status = {"running": True, "profile": self.profile.get("name", "Default"), "plus": None, "pedal": None,
-                       "wave": None, "lights": [], "devices": [], "recentReports": {},
+                       "wave": None, "deck": None, "lights": [], "devices": [], "recentReports": {},
                        "lastAction": "", "lastEvent": "", "error": "", "updatedAt": int(time.time())}
 
     def key_image(self, dev, index, key):
         action = key.get("action", "")
         path = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72]))
         if not path or not path.exists(): return
-        data = path.read_bytes(); page = 0
+        self.write_key_jpeg(dev, index, path.read_bytes())
+
+    def write_key_jpeg(self, dev, index, data):
+        page = 0
         for offset in range(0, len(data), 1016):
             payload = data[offset:offset + 1016]; final = offset + len(payload) >= len(data)
             header = [0x02, 0x07, index, 1 if final else 0, len(payload) & 255, len(payload) >> 8, page & 255, page >> 8]
             self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
             page += 1
 
+    def deck_key_image(self, dev, index, key):
+        # The V2 panel is 72x72 and mounted upside down relative to its image data.
+        converter = shutil.which("magick") or shutil.which("convert")
+        if not converter: return
+        action = key.get("action", "")
+        source = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72])) if action else None
+        stamp = str(source.stat().st_mtime_ns) if source and source.exists() else "blank"
+        digest = hashlib.sha256(json.dumps(["deck-v2", str(source), stamp]).encode()).hexdigest()[:20]
+        KEY_CACHE.mkdir(parents=True, exist_ok=True)
+        output = KEY_CACHE / ("v2-" + digest + ".jpg")
+        if not output.is_file():
+            src = [str(source), "-resize", "72x72!"] if source and source.exists() else ["-size", "72x72", "xc:black"]
+            try: subprocess.run([converter] + src + ["-rotate", "180", "-quality", "92", str(output)], check=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+            except (OSError, subprocess.SubprocessError): return
+        self.write_key_jpeg(dev, index, output.read_bytes())
+
+    def decorate_deck(self, dev):
+        self.mic_phase = -1
+        self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
+        for i, key in enumerate(self.profile.get("deckKeys", [])[:DECK_KEYS]): self.deck_key_image(dev, i, key)
+
     def decorate(self, dev):
+        self.mic_phase = -1
         self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
         for i, key in enumerate(self.profile.get("keys", [])[:8]):
             color = key.get("color", [40, 90, 130])
@@ -704,11 +763,12 @@ class Daemon:
                 if handle:
                     self.devices[info["path"]] = dict(info, handle=handle)
                     if info["productId"] == PLUS: self.decorate(handle)
-        for pid, key in ((PLUS, "plus"), (PEDAL, "pedal")):
+                    elif info["productId"] == DECK: self.decorate_deck(handle)
+        for pid, key in ((PLUS, "plus"), (PEDAL, "pedal"), (DECK, "deck")):
             value = next((d for d in self.devices.values() if d["productId"] == pid), None)
             self.status[key] = ({k: value[k] for k in ("product", "serial", "path", "kind", "capabilities")} if value else None)
         self.status["wave"] = detect_wave()
-        devices = [self.status[x] for x in ("plus", "pedal", "wave") if self.status.get(x)]
+        devices = [self.status[x] for x in ("plus", "pedal", "deck", "wave") if self.status.get(x)]
         if self.status.get("lights"):
             devices.append({"product": "Elgato Key Lights", "kind": "lights", "connected": True,
                             "capabilities": ["lights", "power", "brightness", "temperature"],
@@ -783,6 +843,7 @@ class Daemon:
             for d in self.devices.values():
                 if d["productId"] == PLUS:
                     self.hid.feature(d["handle"], [0x03, 0x08, self.brightness]); self.update_lcd(d["handle"])
+                elif d["productId"] == DECK: self.hid.feature(d["handle"], [0x03, 0x08, self.brightness])
         else:
             cmd = command_for(action, self.status.get("wave"))
             if cmd:
@@ -837,6 +898,28 @@ class Daemon:
             self.status["lastAction"] = "camera " + ("on: lights on" if active else "off: lights off")
             self.status["lastEvent"] = time.strftime("%H:%M:%S")
             self.refresh_lights()
+    def mic_key_slots(self):
+        for d in self.devices.values():
+            if d["productId"] == PLUS:
+                for i, k in enumerate(self.profile.get("keys", [])[:8]):
+                    if k.get("action") == "mic_mute": yield d, i, k, False
+            elif d["productId"] == DECK:
+                for i, k in enumerate(self.profile.get("deckKeys", [])[:DECK_KEYS]):
+                    if k.get("action") == "mic_mute": yield d, i, k, True
+
+    def sync_mic_keys(self):
+        """Keep mic-mute keys in step with the real mute state; flash red while muted."""
+        wave = self.status.get("wave")
+        muted = mic_muted(str((wave or {}).get("sourceId", "@DEFAULT_AUDIO_SOURCE@")))
+        phase = int(time.monotonic() / 0.6) % 2 if muted else None
+        if muted == self.mic_muted and phase == self.mic_phase: return
+        self.mic_muted, self.mic_phase = muted, phase
+        for d, i, key, is_deck in self.mic_key_slots():
+            if muted:
+                data = mute_jpeg(phase == 0, 72 if is_deck else 120, is_deck)
+                if data: self.write_key_jpeg(d["handle"], i, data)
+            elif is_deck: self.deck_key_image(d["handle"], i, key)
+            else: self.key_image(d["handle"], i, key)
 
     def act_lights(self, action):
         if not self.light_states: self.refresh_lights()
@@ -875,6 +958,13 @@ class Daemon:
                         action = self.profile["dials"][i].get("right" if tick > 0 else "left")
                         for _ in range(min(abs(tick), 5)): self.act(action)
 
+    def parse_deck(self, data):
+        if len(data) < 4 + DECK_KEYS or data[0] != 1: return
+        states = list(data[4:4 + DECK_KEYS]); old = self.previous.get("deck_keys", [0] * DECK_KEYS)
+        for i, state in enumerate(states):
+            if state and not old[i] and i < len(self.profile.get("deckKeys", [])): self.act(self.profile["deckKeys"][i].get("action"))
+        self.previous["deck_keys"] = states
+
     def parse_pedal(self, data):
         if len(data) < 4 or data[0] != 1: return
         # Pedal firmware uses the classic key report: report id, reserved,
@@ -889,7 +979,7 @@ class Daemon:
         self.previous["pedals"] = states
 
     def loop(self):
-        last_connect = last_status = last_lights = last_lcd = last_camera = 0
+        last_connect = last_status = last_lights = last_lcd = last_camera = last_mic = 0
         while self.running:
             now = time.monotonic()
             self.poll_capture()
@@ -902,8 +992,10 @@ class Daemon:
                         if device["productId"] == PLUS:
                             for index, key in enumerate(self.profile.get("keys", [])[:8]):
                                 self.key_image(device["handle"], index, key)
+                        elif device["productId"] == DECK: self.decorate_deck(device["handle"])
             if now - last_lights > 5: self.refresh_lights(); last_lights = now
             if now - last_camera > 1: self.sync_camera_lights(); last_camera = now
+            if now - last_mic > .3: self.sync_mic_keys(); last_mic = now
             try:
                 mtime = PROFILE.stat().st_mtime
                 if mtime != self.mtime:
@@ -911,12 +1003,16 @@ class Daemon:
                     self.lcd_signature = None
                     for device in self.devices.values():
                         if device["productId"] == PLUS: self.decorate(device["handle"])
+                        elif device["productId"] == DECK: self.decorate_deck(device["handle"])
+                        elif device["productId"] == DECK: self.decorate_deck(device["handle"])
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
             for d in list(self.devices.values()):
                 data = self.hid.read(d["handle"])
                 if data:
                     self.status["recentReports"][d["kind"]] = {"hex": data.hex(), "length": len(data), "at": int(time.time())}
-                    self.parse_plus(data) if d["productId"] == PLUS else self.parse_pedal(data)
+                    if d["productId"] == PLUS: self.parse_plus(data)
+                    elif d["productId"] == DECK: self.parse_deck(data)
+                    else: self.parse_pedal(data)
             if now - last_lcd > .2:
                 for device in self.devices.values():
                     if device["productId"] == PLUS: self.update_lcd(device["handle"])
@@ -932,6 +1028,7 @@ def main():
     p = argparse.ArgumentParser(); sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("capture-region"); sub.add_parser("daemon"); sub.add_parser("init"); sub.add_parser("profile"); sub.add_parser("catalog")
     pedal = sub.add_parser("set-pedal"); pedal.add_argument("index", type=int, choices=(1, 2, 3)); pedal.add_argument("action")
+    deck = sub.add_parser("set-deck-key"); deck.add_argument("index", type=int, choices=range(1, 16)); deck.add_argument("action")
     key = sub.add_parser("set-key"); key.add_argument("index", type=int, choices=range(1, 9)); key.add_argument("action")
     dial = sub.add_parser("set-dial"); dial.add_argument("index", type=int, choices=range(1, 5)); dial.add_argument("slot", choices=("left", "press", "right")); dial.add_argument("action")
     wave = sub.add_parser("wave"); wave.add_argument("action", choices=("gain-up", "gain-down", "mute", "headphone-up", "headphone-down", "headphone-mute", "preset-quiet", "preset-normal", "preset-loud", "default"))
@@ -949,6 +1046,10 @@ def main():
     if args.command == "catalog": print(json.dumps(action_catalog())); return
     if args.command == "set-pedal":
         try: set_pedal_action(args.index - 1, args.action)
+        except ValueError as error: p.error(str(error))
+        print(PROFILE); return
+    if args.command == "set-deck-key":
+        try: set_control_action("deckKeys", args.index - 1, "action", args.action)
         except ValueError as error: p.error(str(error))
         print(PROFILE); return
     if args.command == "set-key":
