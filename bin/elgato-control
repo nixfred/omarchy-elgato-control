@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small hidapi-based Stream Deck daemon for Omarchy."""
-import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
+import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 VID = 0x0FD9
 PLUS, PEDAL = 0x0084, 0x0086
@@ -607,6 +607,23 @@ def lcd_svg(profile, brightness, light_states, audio=None):
         cells.append(f'<path d="M{x+87} 84h9m4 0h9m4 0h9" stroke="{secondary}" stroke-width="2" opacity=".65"/>')
     return '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="100"><rect width="800" height="100" fill="#020408"/>%s</svg>' % "".join(cells)
 
+def camera_in_use(device):
+    """True when any process we can inspect holds the camera device open."""
+    try: target = os.stat(device).st_rdev
+    except OSError: return False
+    me = os.getpid()
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit() or int(entry.name) == me: continue
+        fd_dir = entry.path + "/fd"
+        try: fds = os.listdir(fd_dir)
+        except OSError: continue
+        for fd in fds:
+            try:
+                st = os.stat(fd_dir + "/" + fd)
+                if stat.S_ISCHR(st.st_mode) and st.st_rdev == target: return True
+            except OSError: continue
+    return False
+
 class Daemon:
     def __init__(self):
         self.hid, self.devices, self.previous = Hid(), {}, {}
@@ -616,6 +633,8 @@ class Daemon:
         self.discovered_lights = []
         self.last_light_discovery = 0
         self.lcd_signature = None
+        self.camera_state = None
+        self.camera_off_since = None
         self.icon_theme = cyber_icons.theme_signature()
         self.running = True
         self.capture_process = None
@@ -794,6 +813,31 @@ class Daemon:
         for d in self.devices.values():
             if d["productId"] == PLUS: self.update_lcd(d["handle"])
 
+    def sync_camera_lights(self):
+        """Turn the Key Lights on while the camera is open and off shortly after it closes."""
+        cfg = self.profile.get("cameraSync", {})
+        if not cfg.get("enabled", False): self.camera_state = None; return
+        active = camera_in_use(cfg.get("device", "/dev/video0"))
+        now = time.monotonic()
+        if active:
+            self.camera_off_since = None
+            if self.camera_state is True: return
+        else:
+            if self.camera_state is not True:
+                self.camera_state = False; return
+            if self.camera_off_since is None: self.camera_off_since = now
+            if now - self.camera_off_since < float(cfg.get("offDelay", 3)): return
+        payload = {"on": 1 if active else 0}
+        sent = False
+        for light in self.profile.get("lights", []) or self.discovered_lights or available_lights():
+            try: light_request(light, payload); sent = True
+            except Exception as e: self.status["error"] = "Camera sync: " + str(e)
+        if sent or not active:
+            self.camera_state = active; self.camera_off_since = None
+            self.status["lastAction"] = "camera " + ("on: lights on" if active else "off: lights off")
+            self.status["lastEvent"] = time.strftime("%H:%M:%S")
+            self.refresh_lights()
+
     def act_lights(self, action):
         if not self.light_states: self.refresh_lights()
         reachable = [x for x in self.light_states if x.get("reachable")]
@@ -845,7 +889,7 @@ class Daemon:
         self.previous["pedals"] = states
 
     def loop(self):
-        last_connect = last_status = last_lights = last_lcd = 0
+        last_connect = last_status = last_lights = last_lcd = last_camera = 0
         while self.running:
             now = time.monotonic()
             self.poll_capture()
@@ -859,6 +903,7 @@ class Daemon:
                             for index, key in enumerate(self.profile.get("keys", [])[:8]):
                                 self.key_image(device["handle"], index, key)
             if now - last_lights > 5: self.refresh_lights(); last_lights = now
+            if now - last_camera > 1: self.sync_camera_lights(); last_camera = now
             try:
                 mtime = PROFILE.stat().st_mtime
                 if mtime != self.mtime:

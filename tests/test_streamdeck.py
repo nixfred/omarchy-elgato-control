@@ -165,6 +165,29 @@ class DeviceModelTests(unittest.TestCase):
         request.assert_called_once_with(lights[0], {"temperature": 200, "on": 1})
 
 
+class CameraSyncTests(unittest.TestCase):
+    def daemon(self, profile):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.profile, daemon.status = profile, {}
+        daemon.camera_state, daemon.camera_off_since = None, None
+        return daemon
+
+    def test_camera_sync_is_off_by_default(self):
+        daemon = self.daemon({})
+        with mock.patch.object(module, "camera_in_use") as probe:
+            daemon.sync_camera_lights()
+        probe.assert_not_called()
+
+    def test_camera_sync_turns_lights_on_when_enabled(self):
+        daemon = self.daemon({"cameraSync": {"enabled": True}, "lights": ["10.0.0.5"]})
+        daemon.refresh_lights = mock.Mock()
+        with mock.patch.object(module, "camera_in_use", return_value=True), \
+             mock.patch.object(module, "light_request") as request:
+            daemon.sync_camera_lights()
+        request.assert_called_once_with("10.0.0.5", {"on": 1})
+        self.assertTrue(daemon.camera_state)
+
+
 class PedalParserTests(unittest.TestCase):
     def make_daemon(self):
         daemon = module.Daemon.__new__(module.Daemon)
