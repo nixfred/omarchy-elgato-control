@@ -398,7 +398,7 @@ def command_for(action, wave=None):
       "volume_down": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], "media_play_pause": ["omarchy-shell", "media", "playPause"],
       "screenshot": [str(ROOT / "bin" / "elgato-control"), "capture-region"], "screensaver": ["omarchy", "launch", "screensaver", "force"], "lock": ["omarchy", "system", "lock"],
       "govee_lamp": ["sh", "-c", "g=$HOME/bin/govee-lamp; if $g json | grep -q '\"on\": true'; then $g off; else $g on; [ \"$($g mode)\" = off ] || systemctl --user restart govee-lamp.service; fi"],
-      "cliamp": ["sh", "-c", "if pgrep -x cliamp >/dev/null; then cliamp stop >/dev/null 2>&1; pkill -x cliamp; exit 0; fi; omarchy launch or focus cliamp 'omarchy-launch-tui cliamp'; for i in $(seq 50); do cliamp play >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1"],
+      "cliamp": ["sh", "-c", "if pgrep -x cliamp >/dev/null; then cliamp stop >/dev/null 2>&1; pkill -x cliamp; exit 0; fi; exec omarchy launch or focus cliamp 'omarchy-launch-tui cliamp --auto-play'"],
       "voxtype_push_to_talk": ["voxtype", "record", "start"],
       "omameet": ["omarchy-shell", "shell", "toggle", "acp.omameet"], "workspace_next": ["hyprctl", "dispatch", "workspace", "+1"],
       "workspace_prev": ["hyprctl", "dispatch", "workspace", "-1"], "overview": ["hyprctl", "dispatch", "hyprexpo:expo", "toggle"]
