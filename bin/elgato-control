@@ -32,7 +32,7 @@ BUILTIN_ACTIONS = [
     ("brightness_up", "Deck Brighter"), ("brightness_reset", "Deck Brightness 55%"),
     ("terminal", "Open Terminal"), ("browser", "Open Default Browser"), ("files", "Open Files"),
     ("mic_mute", "Mute Microphone"), ("media_play_pause", "Play / Pause"),
-    ("screenshot", "Region to Clipboard"), ("screensaver", "Screensaver"), ("lock", "Lock Screen"), ("cliamp", "CLIAMP: Play / Quit"), ("govee_lamp", "Office Light: Toggle"), ("omameet", "Open OmaMeet"),
+    ("screenshot", "Region to Clipboard"), ("screensaver", "Screensaver"), ("lock", "Lock Screen"), ("cliamp", "CLIAMP: Play / Quit"), ("govee_lamp", "Office Light: Toggle"), ("govee_brightness_down", "Office Light: Dimmer"), ("govee_brightness_up", "Office Light: Brighter"), ("omameet", "Open OmaMeet"),
     ("workspace_prev", "Previous Workspace"), ("workspace_next", "Next Workspace"),
     ("overview", "Workspace Overview"), ("volume_down", "Volume Down"), ("volume_up", "Volume Up"),
     ("volume_mute", "Mute Output"), ("mic_down", "Microphone Down"), ("mic_up", "Microphone Up"),
@@ -387,6 +387,8 @@ def command_for(action, wave=None):
     return {
       "herdr": ["uwsm-app", "--", "foot", "-e", "herdr"],
       "meeting_record": ["sh", "-c", "m=omarchy-meeting-recorder; wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0; case $(timeout 2 $m watch 2>/dev/null | head -1) in *'\"state\":\"off\"'*|'') setsid uwsm-app -- $m >/dev/null 2>&1 &;; esac; for i in $(seq 40); do $m start >/dev/null 2>&1 && exit 0; sleep 0.25; done; exit 1"],
+      "govee_brightness_up": ["sh", "-c", "g=$HOME/bin/govee-lamp; b=$($g json | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"brightness\"])'); $g brightness $(python3 -c \"print(max(1,min(100,${b:-50}+10)))\")"],
+      "govee_brightness_down": ["sh", "-c", "g=$HOME/bin/govee-lamp; b=$($g json | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"brightness\"])'); $g brightness $(python3 -c \"print(max(1,min(100,${b:-50}-10)))\")"],
       "orca": ["omarchy", "launch", "or", "focus", "orca", "uwsm-app -- /home/pi/Applications/orca-linux.AppImage"],
       "workspace_cycle_prev": ["hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "e-1" })'],
       "workspace_cycle_next": ["hyprctl", "dispatch", 'hl.dsp.focus({ workspace = "e+1" })'],
