@@ -400,7 +400,7 @@ def command_for(action, wave=None):
       "volume_down": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"], "media_play_pause": ["omarchy-shell", "media", "playPause"],
       "screenshot": [str(ROOT / "bin" / "elgato-control"), "capture-region"], "screensaver": ["omarchy", "launch", "screensaver", "force"], "lock": ["omarchy", "system", "lock"],
       "govee_lamp": ["sh", "-c", "g=$HOME/bin/govee-lamp; if $g json | grep -q '\"on\": true'; then $g off; else $g on; [ \"$($g mode)\" = off ] || systemctl --user restart govee-lamp.service; fi"],
-      "cliamp": ["sh", "-c", "if pgrep -x cliamp >/dev/null; then cliamp stop >/dev/null 2>&1; pkill -x cliamp; exit 0; fi; exec omarchy launch or focus cliamp 'omarchy-launch-tui cliamp --auto-play'"],
+      "cliamp": [str(ROOT / "bin" / "elgato-control"), "cliamp-toggle"],
       "voxtype_push_to_talk": ["voxtype", "record", "start"],
       "omameet": ["omarchy-shell", "shell", "toggle", "acp.omameet"], "workspace_next": ["hyprctl", "dispatch", "workspace", "+1"],
       "workspace_prev": ["hyprctl", "dispatch", "workspace", "-1"], "overview": ["hyprctl", "dispatch", "hyprexpo:expo", "toggle"]
@@ -436,9 +436,48 @@ def media_play():
     if status.returncode == 0:
         subprocess.run(["cliamp", "toggle"], check=True, timeout=2)
         return "Toggled Cliamp"
-    subprocess.Popen(["uwsm-app", "--", "foot", "--app-id=cliamp", "-e", "cliamp", "--auto-play"],
-                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cliamp_launch()
     return "Started Cliamp"
+
+# CLIAMP key. cliamp >= 2.4 opens on its station browser ("No track loaded"), so a bare
+# `--auto-play` plays nothing (Fred, 2026-11-11). Name the stream explicitly; https because
+# the http:// URL answers 301. Override with CLIAMP_STATION in the daemon environment.
+CLIAMP_STATION = os.environ.get("CLIAMP_STATION", "https://radio.cliamp.stream/lofi/stream")
+
+def cliamp_running():
+    return subprocess.run(["pgrep", "-x", "cliamp"], stdout=subprocess.DEVNULL).returncode == 0
+
+def cliamp_state():
+    """Lower-case player state from `cliamp status` (playing/paused/stopped), None if unreachable."""
+    try: out = subprocess.run(["cliamp", "status"], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError): return None
+    for line in out.splitlines():
+        if line.startswith("State:"): return line.split(":", 1)[1].strip().lower()
+    return None
+
+def cliamp_quit():
+    subprocess.run(["cliamp", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+    subprocess.run(["pkill", "-x", "cliamp"], stdout=subprocess.DEVNULL)  # also closes its terminal window
+    for _ in range(20):
+        if not cliamp_running(): return
+        time.sleep(.1)
+    subprocess.run(["pkill", "-9", "-x", "cliamp"], stdout=subprocess.DEVNULL)
+
+def cliamp_launch():
+    subprocess.Popen(["omarchy-launch-tui", "cliamp", "--auto-play", CLIAMP_STATION],
+                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def cliamp_toggle():
+    """Playing or paused: quit. Not running, or open but idle: start the station and confirm sound."""
+    if cliamp_running():
+        if cliamp_state() in ("playing", "paused"):
+            cliamp_quit(); return "Stopped CLIAMP"
+        cliamp_quit()  # stuck on the browser with nothing loaded: restart it on the station
+    cliamp_launch()
+    for _ in range(40):
+        time.sleep(.25)
+        if cliamp_state() == "playing": return "Playing CLIAMP"
+    raise RuntimeError("CLIAMP opened but did not start playing " + CLIAMP_STATION)
 
 def capture_region():
     """Select directly on Wayland; do not stack a second mouse-grabbing freeze."""
@@ -1029,7 +1068,7 @@ class Daemon:
 
 def main():
     p = argparse.ArgumentParser(); sub = p.add_subparsers(dest="command", required=True)
-    sub.add_parser("capture-region"); sub.add_parser("daemon"); sub.add_parser("init"); sub.add_parser("profile"); sub.add_parser("catalog")
+    sub.add_parser("capture-region"); sub.add_parser("cliamp-toggle"); sub.add_parser("daemon"); sub.add_parser("init"); sub.add_parser("profile"); sub.add_parser("catalog")
     pedal = sub.add_parser("set-pedal"); pedal.add_argument("index", type=int, choices=(1, 2, 3)); pedal.add_argument("action")
     deck = sub.add_parser("set-deck-key"); deck.add_argument("index", type=int, choices=range(1, 16)); deck.add_argument("action")
     key = sub.add_parser("set-key"); key.add_argument("index", type=int, choices=range(1, 9)); key.add_argument("action")
@@ -1042,6 +1081,13 @@ def main():
         try: return 0 if capture_region() else 2
         except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             print(str(error), file=sys.stderr)
+            return 1
+    if args.command == "cliamp-toggle":
+        try: print(cliamp_toggle()); return 0
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(str(error), file=sys.stderr)
+            if shutil.which("notify-send"):
+                subprocess.run(["notify-send", "-u", "critical", "-a", "Elgato Control", "CLIAMP key", str(error)])
             return 1
     ensure_profile()
     if args.command == "init": print(PROFILE); return

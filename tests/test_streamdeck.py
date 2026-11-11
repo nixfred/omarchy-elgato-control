@@ -233,5 +233,35 @@ class QmlPlainTextTests(unittest.TestCase):
             self.assertIn(binding, panel, f"untrusted QML binding lacks PlainText: {binding}")
 
 
+class CliampKeyTests(unittest.TestCase):
+    def test_key_runs_the_toggle_subcommand(self):
+        self.assertEqual([str(SCRIPT), "cliamp-toggle"], module.command_for("cliamp"))
+
+    def test_station_is_https_and_launch_names_it(self):
+        # cliamp 2.4 opens on a station browser; --auto-play alone plays nothing.
+        self.assertTrue(module.CLIAMP_STATION.startswith("https://"))
+        with mock.patch.object(module.subprocess, "Popen") as popen:
+            module.cliamp_launch()
+        self.assertEqual(["omarchy-launch-tui", "cliamp", "--auto-play", module.CLIAMP_STATION], popen.call_args[0][0])
+
+    def test_playing_quits_and_idle_restarts_on_the_station(self):
+        with mock.patch.object(module, "cliamp_running", return_value=True), \
+             mock.patch.object(module, "cliamp_quit") as quit_, mock.patch.object(module, "cliamp_launch") as launch:
+            with mock.patch.object(module, "cliamp_state", return_value="playing"):
+                self.assertEqual("Stopped CLIAMP", module.cliamp_toggle())
+            quit_.assert_called_once(); launch.assert_not_called()
+            quit_.reset_mock()
+            with mock.patch.object(module, "cliamp_state", side_effect=["stopped", "playing"]), \
+                 mock.patch.object(module.time, "sleep"):
+                self.assertEqual("Playing CLIAMP", module.cliamp_toggle())
+            quit_.assert_called_once(); launch.assert_called_once()
+
+    def test_launch_that_never_plays_raises(self):
+        with mock.patch.object(module, "cliamp_running", return_value=False), mock.patch.object(module, "cliamp_launch"), \
+             mock.patch.object(module, "cliamp_state", return_value="stopped"), mock.patch.object(module.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                module.cliamp_toggle()
+
+
 if __name__ == "__main__":
     unittest.main()
