@@ -234,6 +234,10 @@ class QmlPlainTextTests(unittest.TestCase):
 
 
 class CliampKeyTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(module, "deck_log")  # never write test noise into the real deck.log
+        patcher.start(); self.addCleanup(patcher.stop)
+
     def test_key_runs_the_toggle_subcommand(self):
         self.assertEqual([str(SCRIPT), "cliamp-toggle"], module.command_for("cliamp"))
 
